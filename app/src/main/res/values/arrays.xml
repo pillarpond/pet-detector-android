@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="ssd_mobilenet_v2">
+        <item>SSD MobileNet V2</item>
+        <item>file:///android_asset/ssd_mobilenet_v2.pb</item>
+    </string-array>
+    <string-array name="ssd_inception_v2">
+        <item>SSD Inception V2</item>
+        <item>file:///android_asset/ssd_inception_v2.pb</item>
+    </string-array>
+    <string-array name="faster_rcnn_inception_v2">
+        <item>Faster RCNN Inception V2</item>
+        <item>file:///android_asset/faster_rcnn_inception_v2.pb</item>
+    </string-array>
+
+    <array name="models">
+        <item>@array/ssd_mobilenet_v2</item>
+        <item>@array/ssd_inception_v2</item>
+        <item>@array/faster_rcnn_inception_v2</item>
+    </array>
+</resources>

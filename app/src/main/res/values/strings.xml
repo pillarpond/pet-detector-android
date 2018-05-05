@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">petdetector</string>
+
+    <string name="open_document">open a document</string>
+    <string name="take_picture">take a picture</string>
+    <string name="change_model">change model</string>
+</resources>
