@@ -36,7 +36,7 @@ public class Classifier {
     /**
      * An immutable result returned by a Classifier describing what was recognized.
      */
-    class Recognition {
+    public class Recognition {
         /**
          * A unique identifier for what has been recognized. Specific to the class, not the instance of
          * the object.
@@ -72,11 +72,11 @@ public class Classifier {
             return title;
         }
 
-        Float getConfidence() {
+        public Float getConfidence() {
             return confidence;
         }
 
-        RectF getLocation() {
+        public RectF getLocation() {
             return new RectF(location);
         }
 
@@ -112,9 +112,13 @@ public class Classifier {
 
     // Config values.
     private String inputName;
+    private int width;
+    private int height;
 
     // Pre-allocated buffers.
     private ArrayList<String> labels;
+    private int[] intValues;
+    private byte[] byteValues;
     private float[] outputLocations;
     private float[] outputScores;
     private float[] outputClasses;
@@ -135,7 +139,9 @@ public class Classifier {
     static Classifier create(
             final AssetManager assetManager,
             final String modelFilename,
-            final String labelFilename) throws IOException {
+            final String labelFilename,
+            final int inputWidth,
+            final int inputHeight) throws IOException {
         final Classifier c = new Classifier();
 
         InputStream is = assetManager.open(labelFilename);
@@ -150,6 +156,9 @@ public class Classifier {
         c.inferenceInterface = new TensorFlowInferenceInterface(assetManager, modelFilename);
 
         final Graph g = c.inferenceInterface.graph();
+
+        c.width = inputWidth;
+        c.height = inputHeight;
 
         c.inputName = "image_tensor";
         // The inputName node has a shape of [N, H, W, C], where
@@ -176,8 +185,15 @@ public class Classifier {
         if (outputOp3 == null) {
             throw new RuntimeException("Failed to find output Node 'detection_classes'");
         }
+        final Operation outputOp4 = g.operation("num_detections");
+        if (outputOp4 == null) {
+            throw new RuntimeException("Failed to find output Node 'num_detections'");
+        }
 
         // Pre-allocate buffers.
+        c.intValues = new int[inputWidth * inputHeight];
+        c.byteValues = new byte[inputWidth * inputHeight * 3];
+
         c.outputNames = new String[] {"detection_boxes", "detection_scores",
                 "detection_classes", "num_detections"};
         c.outputScores = new float[MAX_RESULTS];
@@ -196,12 +212,7 @@ public class Classifier {
         Trace.beginSection("preprocessBitmap");
         // Preprocess the image data from 0-255 int to normalized float based
         // on the provided parameters.
-        int h = bitmap.getHeight(), w = bitmap.getWidth();
-
-        int[] intValues = new int[h * w];
-        bitmap.getPixels(intValues, 0, w, 0, 0, w, h);
-        byte[] byteValues = new byte[h * w * 3];
-
+        bitmap.getPixels(intValues, 0, width, 0, 0, width, height);
 
         for (int i = 0; i < intValues.length; ++i) {
             byteValues[i * 3 + 2] = (byte) (intValues[i] & 0xFF);
@@ -212,7 +223,7 @@ public class Classifier {
 
         // Copy the input data into TensorFlow.
         Trace.beginSection("feed");
-        inferenceInterface.feed(inputName, byteValues, 1, h, w, 3);
+        inferenceInterface.feed(inputName, byteValues, 1, height, width, 3);
         Trace.endSection();
 
         // Run the inference call.
@@ -243,10 +254,10 @@ public class Classifier {
 
             final RectF detection =
                     new RectF(
-                            outputLocations[4 * i + 1] * w,
-                            outputLocations[4 * i] * h,
-                            outputLocations[4 * i + 3] * w,
-                            outputLocations[4 * i + 2] * h);
+                            outputLocations[4 * i + 1] * width,
+                            outputLocations[4 * i] * height,
+                            outputLocations[4 * i + 3] * width,
+                            outputLocations[4 * i + 2] * height);
             pq.add(
                     new Recognition("" + i, labels.get((int) outputClasses[i] - 1), outputScores[i], detection));
         }

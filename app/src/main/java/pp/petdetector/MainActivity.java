@@ -1,280 +1,262 @@
+/*
+* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*       http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
 package pp.petdetector;
 
-import android.content.Intent;
-import android.content.res.Resources;
-import android.content.res.TypedArray;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
+import android.graphics.Bitmap.Config;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Matrix;
 import android.graphics.Paint;
-import android.graphics.Paint.Style;
-import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Typeface;
-import android.net.Uri;
-import android.os.Bundle;
-import android.os.ParcelFileDescriptor;
-import android.provider.MediaStore;
+import android.media.ImageReader.OnImageAvailableListener;
+import android.os.SystemClock;
 import android.support.design.widget.Snackbar;
-import android.support.v7.app.AlertDialog;
-import android.support.v7.app.AppCompatActivity;
-import android.util.Log;
-import android.view.View;
-import android.widget.ProgressBar;
+import android.util.Size;
+import android.util.TypedValue;
+import android.widget.FrameLayout;
 
-import com.getbase.floatingactionbutton.FloatingActionsMenu;
-import com.github.chrisbanes.photoview.PhotoView;
+import pp.petdetector.env.BorderedText;
+import pp.petdetector.env.ImageUtils;
+import pp.petdetector.env.Logger;
+import pp.petdetector.tracking.MultiBoxTracker;
 
-import java.io.FileDescriptor;
-import java.io.IOException;
+import java.util.Collections;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Vector;
 
-public class MainActivity extends AppCompatActivity {
-    private static final String TAG = "petdetector";
+/**
+* An activity that uses a SSD MobileNet V2 and ObjectTracker to detect and then track
+* objects.
+*/
+public class MainActivity extends CameraActivity implements OnImageAvailableListener {
+    private static final String MODEL_FILE = "file:///android_asset/ssd_mobilenet_v2.pb";
     private static final String LABELS_FILE = "pet_label.txt";
 
     // Minimum detection confidence to track a detection.
     private static final float MINIMUM_CONFIDENCE_TF_OD_API = 0.6f;
 
-    private static final int REQUEST_READ_IMAGE = 42;
-    private static final int REQUEST_IMAGE_CAPTURE = 43;
+    private static final Logger LOGGER = new Logger();
 
-    private Classifier detector;
+    private static final int CROP_SIZE = 300;
 
-    private PhotoView photoView;
-    private ProgressBar progressBar;
-    private FloatingActionsMenu menu;
+    private static final Size DESIRED_PREVIEW_SIZE = new Size(640, 480);
 
-    private String[] modelPaths;
-    private String[] modelNames;
+    private static final boolean SAVE_PREVIEW_BITMAP = false;
+    private static final float TEXT_SIZE_DIP = 10;
 
-    private int checkedItem = 0;
+    private Integer sensorOrientation;
 
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        setContentView(R.layout.activity_main);
+    private Classifier classifier;
 
-        photoView = findViewById(R.id.image);
-        progressBar = findViewById(R.id.progressBar);
-        menu = findViewById(R.id.menu);
+    private long lastProcessingTimeMs;
+    private Bitmap rgbFrameBitmap = null;
+    private Bitmap croppedBitmap = null;
+    private Bitmap cropCopyBitmap = null;
 
-        Resources resources = getResources();
-        TypedArray ta = resources.obtainTypedArray(R.array.models);
-        int n = ta.length();
+    private boolean computingDetection = false;
 
-        modelNames = new String[n];
-        modelPaths = new String[n];
+    private long timestamp = 0;
 
-        for (int i = 0; i < n; ++i) {
-            int id = ta.getResourceId(i, 0);
-            if (id > 0) {
-                modelNames[i] = resources.getStringArray(id)[0];
-                modelPaths[i] = resources.getStringArray(id)[1];
-            }
-        }
-        ta.recycle();
+    private Matrix frameToCropTransform;
+    private Matrix cropToFrameTransform;
 
-        setModel();
+    private MultiBoxTracker tracker;
 
-        Resources res = getResources();
-        int width = (int) res.getDimension(R.dimen.canvas_width);
-        int height = (int) res.getDimension(R.dimen.canvas_height);
+    private byte[] luminanceCopy;
 
-        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.RGB_565);
-        Canvas canvas = new Canvas(bitmap);
+    private BorderedText borderedText;
 
-        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.LINEAR_TEXT_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
-        paint.setColor(Color.WHITE);
-        paint.setTextSize(res.getDimension(R.dimen.text_size));
+    private Snackbar initSnackbar;
 
-        String str = "Press \"+\" button";
-        Rect rect = new Rect();
-        paint.getTextBounds(str, 0, str.length(), rect);
-
-        canvas.drawText(str, (width - rect.width()) / 2, height / 2, paint);
-        photoView.setImageBitmap(bitmap);
-    }
-
-    private void setModel() {
-        final Snackbar snackBar = Snackbar.make(
-                findViewById(R.id.container),
-                "Initializing...",
-                Snackbar.LENGTH_INDEFINITE);
-        snackBar.show();
-        menu.setEnabled(false);
-
-        new Thread(() -> {
-            try {
-                if (detector != null) detector.close();
-
-                detector = Classifier.create(
-                        getAssets(), modelPaths[checkedItem], LABELS_FILE);
-                runOnUiThread(snackBar::dismiss);
-                menu.setEnabled(true);
-            } catch (Exception e) {
-                Log.e(TAG, "Exception!!", e);
-                finish();
-            }
-        }).start();
-    }
-
-    public void onClick(View view) {
-        menu.collapse();
-        switch (view.getId()) {
-            case R.id.doc_button:
-                performFileSearch();
-                break;
-            case R.id.camera_button:
-                dispatchTakePictureIntent();
-                break;
-            case R.id.change_button:
-                changeModel();
-                break;
-        }
-    }
-
-    public void performFileSearch() {
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("image/*");
-
-        startActivityForResult(intent, REQUEST_READ_IMAGE);
-    }
-
-    private void dispatchTakePictureIntent() {
-        Intent takePictureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-        if (takePictureIntent.resolveActivity(getPackageManager()) != null) {
-            startActivityForResult(takePictureIntent, REQUEST_IMAGE_CAPTURE);
-        }
-    }
-
-    public void changeModel() {
-        new AlertDialog.Builder(this)
-                .setTitle("Choose model")
-                .setSingleChoiceItems(modelNames, checkedItem, (dialogInterface, i) -> {
-                    checkedItem = i;
-                    setModel();
-                }).show();
-    }
+    private boolean initialized = false;
 
     @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        if (resultCode == RESULT_OK) {
-            final Bitmap bitmap;
+    public void onPreviewSizeChosen(final Size size, final int rotation) {
+        new Thread(this::init).start();
 
-            switch (requestCode) {
-                case REQUEST_READ_IMAGE:
-                    bitmap = getBitmapFromUri(data.getData());
-                    break;
+        FrameLayout container = findViewById(R.id.container);
+        initSnackbar = Snackbar.make(container, "Initializing...", Snackbar.LENGTH_INDEFINITE);
 
-                case REQUEST_IMAGE_CAPTURE:
-                    Bundle extras = data.getExtras();
-                    bitmap = (Bitmap) extras.get("data");
-                    break;
+        final float textSizePx =
+        TypedValue.applyDimension(
+                TypedValue.COMPLEX_UNIT_DIP, TEXT_SIZE_DIP, getResources().getDisplayMetrics());
+        borderedText = new BorderedText(textSizePx);
+        borderedText.setTypeface(Typeface.MONOSPACE);
 
-                default:
-                    bitmap = null;
-                    break;
-            }
+        tracker = new MultiBoxTracker(this);
 
-            progressBar.setVisibility(View.VISIBLE);
-            photoView.setVisibility(View.INVISIBLE);
+        previewWidth = size.getWidth();
+        previewHeight = size.getHeight();
 
-            new Thread(() -> {
-                try {
-                    detect(bitmap);
-                } catch (Exception e) {
-                    Log.e(TAG, "Exception!!", e);
-                }
-            }).start();
-        }
+        sensorOrientation = rotation - getScreenOrientation();
+        LOGGER.i("Camera orientation relative to screen canvas: %d", sensorOrientation);
+
+        LOGGER.i("Initializing at size %dx%d", previewWidth, previewHeight);
+        rgbFrameBitmap = Bitmap.createBitmap(previewWidth, previewHeight, Config.ARGB_8888);
+        croppedBitmap = Bitmap.createBitmap(CROP_SIZE, CROP_SIZE, Config.ARGB_8888);
+
+        frameToCropTransform =
+                ImageUtils.getTransformationMatrix(
+                        previewWidth, previewHeight,
+                        CROP_SIZE, CROP_SIZE,
+                        sensorOrientation, false);
+
+        cropToFrameTransform = new Matrix();
+        frameToCropTransform.invert(cropToFrameTransform);
+
+        trackingOverlay = findViewById(R.id.tracking_overlay);
+        trackingOverlay.addCallback(
+                canvas -> {
+                    tracker.draw(canvas);
+                    if (isDebug()) {
+                        tracker.drawDebug(canvas);
+                    }
+                });
+
+        addCallback(
+                canvas -> {
+                    if (!isDebug()) {
+                        return;
+                    }
+                    final Bitmap copy = cropCopyBitmap;
+                    if (copy == null) {
+                        return;
+                    }
+
+                    final int backgroundColor = Color.argb(100, 0, 0, 0);
+                    canvas.drawColor(backgroundColor);
+
+                    final Matrix matrix = new Matrix();
+                    final float scaleFactor = 2;
+                    matrix.postScale(scaleFactor, scaleFactor);
+                    matrix.postTranslate(
+                            canvas.getWidth() - copy.getWidth() * scaleFactor,
+                            canvas.getHeight() - copy.getHeight() * scaleFactor);
+                    canvas.drawBitmap(copy, matrix, new Paint());
+
+                    final Vector<String> lines = new Vector<String>();
+                    if (classifier != null) {
+                        final String statString = classifier.getStatString();
+                        final String[] statLines = statString.split("\n");
+                        Collections.addAll(lines, statLines);
+                    }
+                    lines.add("");
+                    lines.add("Frame: " + previewWidth + "x" + previewHeight);
+                    lines.add("Crop: " + copy.getWidth() + "x" + copy.getHeight());
+                    lines.add("View: " + canvas.getWidth() + "x" + canvas.getHeight());
+                    lines.add("Rotation: " + sensorOrientation);
+                    lines.add("Inference time: " + lastProcessingTimeMs + "ms");
+
+                    borderedText.drawLines(canvas, 10, canvas.getHeight() - 10, lines);
+                });
     }
 
-    private Bitmap getBitmapFromUri(Uri uri) {
-        Bitmap bitmap;
+    OverlayView trackingOverlay;
+
+    void init() {
+        runOnUiThread(()->initSnackbar.show());
 
         try {
-            ParcelFileDescriptor parcelFileDescriptor =
-                    getContentResolver().openFileDescriptor(uri, "r");
-            FileDescriptor fileDescriptor = parcelFileDescriptor.getFileDescriptor();
-            bitmap = BitmapFactory.decodeFileDescriptor(fileDescriptor);
-            parcelFileDescriptor.close();
-        } catch (IOException e) {
-            Log.e(TAG, "Exception!!", e);
-            return null;
+            classifier = Classifier.create(
+                    getAssets(), MODEL_FILE, LABELS_FILE, CROP_SIZE, CROP_SIZE);
+        } catch (Exception e) {
+            LOGGER.e("Exception initializing classifier!", e);
+            finish();
         }
 
-        return bitmap;
+        runOnUiThread(()->initSnackbar.dismiss());
+        initialized = true;
     }
 
-    private void detect(Bitmap bitmap) {
-        if (bitmap == null){
-            Snackbar.make(findViewById(R.id.container), "Error occurred", Snackbar.LENGTH_SHORT).show();
-            drawResult(null);
+    @Override
+    protected void processImage() {
+        ++timestamp;
+        final long currTimestamp = timestamp;
+        byte[] originalLuminance = getLuminance();
+        tracker.onFrame(
+                previewWidth,
+                previewHeight,
+                getLuminanceStride(),
+                sensorOrientation,
+                originalLuminance,
+                timestamp);
+        trackingOverlay.postInvalidate();
+
+        // No mutex needed as this method is not reentrant.
+        if (computingDetection || !initialized) {
+            readyForNextImage();
             return;
         }
+        computingDetection = true;
+        LOGGER.i("Preparing image " + currTimestamp + " for detection in bg thread.");
 
-        int srcWidth = bitmap.getWidth();
-        int srcHeight = bitmap.getHeight();
-        int dstWidth = photoView.getWidth();
-        int dstHeight = photoView.getHeight();
+        rgbFrameBitmap.setPixels(getRgbBytes(), 0, previewWidth, 0, 0, previewWidth, previewHeight);
 
-        float xScale = (float) dstWidth / srcWidth;
-        float yScale = (float) dstHeight / srcHeight;
+        if (luminanceCopy == null) {
+            luminanceCopy = new byte[originalLuminance.length];
+        }
+        System.arraycopy(originalLuminance, 0, luminanceCopy, 0, originalLuminance.length);
+        readyForNextImage();
 
-        float scale = Math.min(xScale, yScale);
-
-        float scaledWidth = scale * srcWidth;
-        float scaledHeight = scale * srcHeight;
-
-        Bitmap copyBitmap = Bitmap.createScaledBitmap(bitmap, (int) scaledWidth, (int) scaledHeight, true);
-        List<Classifier.Recognition> results = detector.recognizeImage(copyBitmap);
-
-        Canvas canvas = new Canvas(copyBitmap);
-
-        Paint paint = new Paint();
-        paint.setColor(Color.RED);
-        paint.setStyle(Style.STROKE);
-        float borderWidth = getResources().getDimension(R.dimen.border_width);
-        paint.setStrokeWidth(borderWidth);
-
-        Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.LINEAR_TEXT_FLAG | Paint.SUBPIXEL_TEXT_FLAG);
-        textPaint.setColor(Color.YELLOW);
-        textPaint.setTypeface(Typeface.DEFAULT_BOLD);
-        textPaint.setTextSize(getResources().getDimension(R.dimen.text_size));
-
-        Paint backgroundPaint = new Paint();
-        backgroundPaint.setColor(Color.RED);
-        backgroundPaint.setStyle(Style.FILL);
-
-        for (final Classifier.Recognition result : results) {
-            final RectF location = result.getLocation();
-            if (location != null && result.getConfidence() >= MINIMUM_CONFIDENCE_TF_OD_API) {
-                canvas.drawRect(location, paint);
-
-                String str = result.getTitle() + " (" + (int) (result.getConfidence() * 100) + "%)";
-                float x = location.left + borderWidth / 2;
-                float y = location.bottom - borderWidth / 2;
-
-                Rect bounds = new Rect();
-                textPaint.getTextBounds(str, 0, str.length(), bounds);
-                bounds.offset((int) x, (int) y);
-
-                canvas.drawRect(bounds, backgroundPaint);
-                canvas.drawText(str, x, y, textPaint);
-            }
+        final Canvas canvas = new Canvas(croppedBitmap);
+        canvas.drawBitmap(rgbFrameBitmap, frameToCropTransform, null);
+        // For examining the actual TF input.
+        if (SAVE_PREVIEW_BITMAP) {
+            ImageUtils.saveBitmap(croppedBitmap);
         }
 
-        drawResult(copyBitmap);
+        runInBackground(
+                () -> {
+                    LOGGER.i("Running detection on image " + currTimestamp);
+                    final long startTime = SystemClock.uptimeMillis();
+
+                    cropCopyBitmap = Bitmap.createBitmap(croppedBitmap);
+                    List<Classifier.Recognition> results = classifier.recognizeImage(croppedBitmap);
+                    lastProcessingTimeMs = SystemClock.uptimeMillis() - startTime;
+
+                    final List<Classifier.Recognition> mappedRecognitions = new LinkedList<>();
+
+                    for (final Classifier.Recognition result : results) {
+                        final RectF location = result.getLocation();
+                        if (location != null && result.getConfidence() >= MINIMUM_CONFIDENCE_TF_OD_API) {
+                            cropToFrameTransform.mapRect(location);
+                            result.setLocation(location);
+                            mappedRecognitions.add(result);
+                        }
+                    }
+
+                    tracker.trackResults(mappedRecognitions, luminanceCopy, currTimestamp);
+                    trackingOverlay.postInvalidate();
+
+                    requestRender();
+                    computingDetection = false;
+                });
     }
 
-    void drawResult(Bitmap bitmap) {
-        runOnUiThread(()-> {
-            progressBar.setVisibility(View.GONE);
-            photoView.setImageBitmap(bitmap);
-            photoView.setVisibility(View.VISIBLE);
-        });
+    @Override
+    protected int getLayoutId() {
+        return R.layout.camera_connection_fragment_tracking;
+    }
+
+    @Override
+    protected Size getDesiredPreviewFrameSize() {
+        return DESIRED_PREVIEW_SIZE;
     }
 }
